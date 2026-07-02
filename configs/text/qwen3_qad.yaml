@@ -1,0 +1,59 @@
+model:
+  model_path: /home/zhizhousha/workspace/low-precision-project/model-and-data/models/Qwen3-8B
+  ops_implementation:
+    attn_implementation: flash_attention_2
+
+data:
+  # Shard-level split produced by scripts/qad/make_eval_split.py (v1, seed 0):
+  # 274 shards train / shard 274 held out with a fixed 2000-sample eval subset.
+  train_path: /home/zhizhousha/workspace/low-precision-project/model-and-data/datasets/qad-split-Qwen3-8B/train
+  eval_path: /home/zhizhousha/workspace/low-precision-project/model-and-data/datasets/qad-split-Qwen3-8B/eval
+  data_type: pretokenized
+  max_seq_len: 8192
+  # Token budget per epoch (dyn_bsz semantics): steps = train_size /
+  # (global_batch_size * max_seq_len). The default (1e7) silently caps a run
+  # at ~20 steps. 1e10 ~= one full pass over the 3M-sample split (~19k steps
+  # at gbs 64); override on the CLI for shorter runs.
+  train_size: 10000000000
+  dyn_bsz_buffer_size: 200
+
+train:
+  qad:
+    enable: true
+    mode: w4
+    tau: 1.0
+    alpha: 1.0
+    teacher_topk: 128
+    calib_steps: 16
+  accelerator:
+    ulysses_size: 1
+    fsdp_config:
+      fsdp_mode: fsdp2
+      mixed_precision:
+        enable: true
+  gradient_checkpointing:
+    enable: true
+  global_batch_size: 64
+  micro_batch_size: 1
+  optimizer:
+    type: adamw
+    lr: 2.0e-5
+    lr_decay_style: cosine
+    lr_warmup_ratio: 0.01
+    max_grad_norm: 1.0
+  num_train_epochs: 1
+  eval_steps: 200
+  init_device: meta
+  enable_full_determinism: false
+  empty_cache_steps: 500
+  checkpoint:
+    output_dir: Qwen3-8B-qad-w4
+    manager: dcp
+    save_steps: 200
+    # HF export stays off for QAD: the deployment artifact is the NVFP4
+    # checkpoint produced by the export script from the latent DCP state.
+    save_hf_weights: false
+  wandb:
+    enable: false
+    project: VeOmni-QAD
+    name: qwen3-8b-qad-w4

@@ -42,6 +42,34 @@ from ..utils.dist_utils import main_process_first
 from ..utils.multisource_utils import parse_multisource_config
 
 
+def _patch_datasets_list_feature():
+    """Read parquet written by datasets>=4 with the pinned datasets 2.x.
+
+    datasets 4.0 introduced a ``List`` feature type that its parquet metadata
+    references by name; 2.x's ``generate_from_dict`` then resolves ``List``
+    to ``typing.List`` and dies with ``TypeError: must be called with a
+    dataclass type``. Registering ``List`` -> ``Sequence`` in
+    ``_FEATURE_TYPES`` (checked before module globals — the intended
+    extension point) makes flat lists (``List(Value(...))``) load exactly.
+
+    Scope limit: 4.x ``List`` of a *dict* feature (chat-messages-shaped
+    columns) is ``list<struct>`` on disk, while 2.x ``Sequence(dict)``
+    transposes to ``struct<list>`` — such columns fail at load with an
+    ``ArrowNotImplementedError`` cast error. If you hit that on a
+    pretokenized dataset, this shim is why; bumping datasets to >=4 is the
+    real fix. The registration self-disables on datasets>=4 (native List).
+    """
+    import datasets.features.features as _ff
+
+    if not hasattr(_ff, "_FEATURE_TYPES"):
+        return
+    if "List" not in _ff._FEATURE_TYPES:
+        _ff._FEATURE_TYPES["List"] = _ff.Sequence
+
+
+_patch_datasets_list_feature()
+
+
 logger = logging.get_logger(__name__)
 
 DATASET_REGISTRY = Registry("Dataset")

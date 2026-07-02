@@ -46,6 +46,45 @@ def split_into_chunks(sequence: Sequence[int], chunk_size: int) -> List[List[int
     return chunks
 
 
+@DATA_TRANSFORM_REGISTRY.register("pretokenized")
+def process_pretokenized_example(
+    example: Dict[str, Any],
+    max_seq_len: int,
+    **kwargs,
+) -> List[Dict[str, "torch.Tensor"]]:
+    """Pass through samples that already carry ``input_ids`` / ``labels``.
+
+    For datasets tokenized offline (e.g. parquet with ``input_ids`` int32,
+    ``labels`` int64 with IGNORE_INDEX over prompt spans, ``attention_mask``
+    int8). Skipping re-tokenization avoids chat-template drift: VeOmni's
+    templates are independent implementations and are not guaranteed
+    token-identical to whatever produced the dataset.
+
+    Sequences longer than ``max_seq_len`` are tail-truncated. ``labels`` and
+    ``attention_mask`` fall back to a copy of ``input_ids`` / all-ones when
+    absent.
+    """
+    raw_len = len(example["input_ids"])
+    for key in ("labels", "attention_mask"):
+        if key in example and len(example[key]) != raw_len:
+            raise ValueError(
+                f"pretokenized sample has mismatched lengths: input_ids={raw_len}, {key}={len(example[key])} "
+                "— a malformed row would silently corrupt packed-sequence alignment downstream."
+            )
+    input_ids = torch.as_tensor(example["input_ids"], dtype=torch.long)[:max_seq_len]
+    if "labels" in example:
+        labels = torch.as_tensor(example["labels"], dtype=torch.long)[:max_seq_len]
+    else:
+        labels = input_ids.clone()
+    if "attention_mask" in example:
+        attention_mask = torch.as_tensor(example["attention_mask"], dtype=torch.long)[:max_seq_len]
+    else:
+        attention_mask = torch.ones_like(input_ids)
+    if input_ids.numel() == 0:
+        return []
+    return [{"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}]
+
+
 @DATA_TRANSFORM_REGISTRY.register("plaintext")
 def process_plaintext_example(
     example: Dict[str, Any],

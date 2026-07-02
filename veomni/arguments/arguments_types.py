@@ -173,6 +173,76 @@ class WandbConfig:
 
 
 @dataclass
+class QADConfig:
+    """train.qad.* — Quantization-aware distillation (NVFP4 w4a4 deployment target).
+
+    The NVFP4 format parameters (E2M1, block size 16, E4M3 block scales, FP32
+    global scale) are deployment constants and deliberately not configurable.
+    """
+
+    enable: bool = field(
+        default=False,
+        metadata={"help": "Enable quantization-aware distillation training."},
+    )
+    mode: Literal["w4", "w4a4", "a4"] = field(
+        default="w4a4",
+        metadata={
+            "help": (
+                "Which tensors get fake-quantized during training. The deployment target is "
+                "always w4a4 NVFP4; w4/a4 are ablation modes and must be evaluated under full "
+                "w4a4 simulation."
+            )
+        },
+    )
+    target_modules: List[str] = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        metadata={"help": "Linear module names (last path component) to wrap with fake quantization."},
+    )
+    tau: float = field(
+        default=1.0,
+        metadata={"help": "Distillation temperature (divides logits before softmax)."},
+    )
+    alpha: float = field(
+        default=1.0,
+        metadata={"help": "Loss mix: alpha * distill_KL + (1 - alpha) * hard-label CE."},
+    )
+    teacher_topk: int = field(
+        default=128,
+        metadata={"help": "Number of teacher top-k tokens used as the forward-KL distillation target."},
+    )
+    calib_steps: int = field(
+        default=16,
+        metadata={"help": "Calibration batches for the activation global scale (w4a4/a4 modes)."},
+    )
+    teacher_mode: Literal["separate", "offline"] = field(
+        default="separate",
+        metadata={"help": "separate: frozen teacher model in memory; offline: precomputed teacher top-k."},
+    )
+    teacher_model_path: Optional[str] = field(
+        default=None,
+        metadata={"help": "Teacher weights path. Defaults to model.model_path (self-distillation)."},
+    )
+    clamp_stats_interval: int = field(
+        default=50,
+        metadata={"help": "Collect weight clamp-ratio stats every N steps for wandb. 0 disables."},
+    )
+
+    def __post_init__(self):
+        if self.mode not in ("w4", "w4a4", "a4"):
+            raise ValueError(f"train.qad.mode must be one of 'w4', 'w4a4', 'a4', got {self.mode!r}.")
+        if self.teacher_mode not in ("separate", "offline"):
+            raise ValueError(f"train.qad.teacher_mode must be 'separate' or 'offline', got {self.teacher_mode!r}.")
+        if not 0.0 <= self.alpha <= 1.0:
+            raise ValueError(f"train.qad.alpha must be in [0, 1], got {self.alpha}.")
+        if self.tau <= 0.0:
+            raise ValueError(f"train.qad.tau must be positive, got {self.tau}.")
+        if self.teacher_topk <= 0:
+            raise ValueError(f"train.qad.teacher_topk must be positive, got {self.teacher_topk}.")
+        if self.enable and self.mode in ("w4a4", "a4") and self.calib_steps <= 0:
+            raise ValueError(f"train.qad.mode={self.mode} requires calib_steps > 0, got {self.calib_steps}.")
+
+
+@dataclass
 class ProfileConfig:
     """train.profile.* — Torch profiler settings."""
 
@@ -552,6 +622,7 @@ class TrainingArguments:
 
     # sub-argument groups
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    qad: QADConfig = field(default_factory=QADConfig)
     wandb: WandbConfig = field(default_factory=WandbConfig)
     profile: ProfileConfig = field(default_factory=ProfileConfig)
     gradient_checkpointing: GradientCheckpointingConfig = field(default_factory=GradientCheckpointingConfig)
@@ -1153,7 +1224,7 @@ class DataArguments:
             "help": "Number of samples for training to compute training steps for non-dynamic batch dataloader."
         },
     )
-    data_type: Literal["plaintext", "conversation", "diffusion", "classification", "dpo"] = field(
+    data_type: Literal["plaintext", "conversation", "diffusion", "classification", "dpo", "pretokenized"] = field(
         default="conversation",
         metadata={"help": "Type of the training data."},
     )
@@ -1208,6 +1279,8 @@ class DataArguments:
                 self.text_keys = "text"
             elif self.data_type == "dpo":
                 self.text_keys = "chosen"
+            elif self.data_type == "pretokenized":
+                self.text_keys = "input_ids"
             else:
                 raise ValueError(f"Unknown data type: {self.data_type}")
 

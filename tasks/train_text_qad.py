@@ -12,24 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from veomni.arguments import VeOmniArguments, parse_args
+from veomni.trainer.text_qad_trainer import TextQADTrainer
 
-from .arguments_types import (
-    AcceleratorConfig,
-    CheckpointConfig,
-    DataArguments,
-    DataloaderConfig,
-    FSDPConfig,
-    GradientCheckpointingConfig,
-    InferArguments,
-    MixedPrecisionConfig,
-    ModelArguments,
-    OffloadConfig,
-    OpsImplementationConfig,
-    OptimizerConfig,
-    ProfileConfig,
-    QADConfig,
-    TrainingArguments,
-    VeOmniArguments,
-    WandbConfig,
-)
-from .parser import parse_args, save_args
+
+if __name__ == "__main__":
+    args = parse_args(VeOmniArguments)
+    trainer = TextQADTrainer(args)
+    trainer.train()
