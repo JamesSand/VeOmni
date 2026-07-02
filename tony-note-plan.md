@@ -482,3 +482,91 @@ torchrun --nproc_per_node=8 tasks/train_text_qad.py configs/text/qwen3_qad.yaml
 - manifest 是 `sleep infinity` + 手动 exec，训练崩了**不会自动重启** ——
   长训练要么包一层 supervisor 脚本，要么后续改成 Job + `restartPolicy`；
 - kubeconfig 是集群凭据，已在 `.gitignore`，不要提交或外发。
+
+---
+
+## 11. 导出 w4 / w4a4 checkpoint 至 w4a4 部署格式 + 统一口径评测
+
+### 输入（两条已训 checkpoint，训练已停）
+
+| checkpoint | DCP 路径 | 训练量 | 训练中最后 eval | 口径 |
+|---|---|---|---|---|
+| **w4a4-QAD** | `qad-runs/qwen3-8b-w4a4-v3/checkpoints/global_step_400` | 400 步 | 1.3872（恢复 29%） | w4a4 |
+| **w4-QAD** | `qad-runs/qwen3-8b-w4-v3/checkpoints/global_step_400` | 400 步 | 1.3575（恢复 34%） | **w4a16** |
+
+**两条统一用 step-400 checkpoint,训练量严格一致**,对比公平。w4 的
+step-800（1.3529,恢复 43%）另测一版作为"更多训练量"的参考点。注意 w4
+的恢复率是 w4a16 口径，换到 w4a4 部署口径必然回吐一部分（激活误差它没
+训过）。
+
+### 导出流程（已在冒烟 checkpoint 上端到端验证）
+
+每条 checkpoint 走两阶段：
+
+```
+Stage A（VeOmni venv）:
+  merge_dcp_to_hf.py --load-dir <DCP> --model-assets-dir <run>/model_assets
+    → bf16 潜权重 HF checkpoint
+
+Stage B（Model-Optimizer venv）:
+  export_nvfp4.py --hf-latent <A输出> --calib-data <qad-split>/train
+    → strip act_global_amax buffer → mtq.quantize(NVFP4, calib) → TRT-LLM 格式
+```
+
+**两条 checkpoint 的关键差异在激活 scale 来源：**
+
+- **w4a4-QAD**：训练前校准的激活 amax 就存在 DCP 的 `act_global_amax`
+  buffer 里 —— 导出加 `--reuse-trained-act-amax`，把**训练仿真时的激活
+  grid 原样带进部署**（最高保真：部署的就是 loss 优化过的那个格）。
+  weight scale 从最终潜权重重算（与训练每步同规则，自洽）。
+- **w4-QAD**：训练全程未碰激活，buffer 全零 —— 走默认 fresh calibration
+  路径（modelopt 在最终权重上跑 128 条校准样本）。即该产物 =
+  "权重 QAD + 激活 PTQ"。**不要**加 `--reuse-trained-act-amax`（脚本会
+  因无有效值报错，这是有意的 guard）。
+
+### 统一 w4a4 口径评测（fake-quant 仿真，本机 H100 可做）
+
+新脚本 `scripts/qad/eval_w4a4.py`：加载 HF 潜权重 → `wrap_linears_for_qad
+(mode="w4a4")` → 校准激活（64 batch 训练数据；w4a4-QAD 另测一版注入训练
+amax 的）→ 在固定 eval-500 上测 PPL。产出四点对比表：
+
+| 对比点 | 含义 |
+|---|---|
+| teacher（1.3241） | 全精度上界 |
+| PTQ-W₀（1.4125，已有） | naive PTQ 下界 |
+| **w4a4-QAD @400** | 端到端 QAD |
+| **w4-QAD @800 + A-PTQ** | 权重 QAD、激活 PTQ 的混合路线 |
+
+这张表回答核心问题：**激活量化到底需不需要参与训练**（若 w4-QAD+A-PTQ
+逼近 w4a4-QAD，训练可以省掉激活仿真的开销和 a4 模式暴露的敏感性）。
+
+真实 kernel 验证（TRT-LLM on Blackwell）仍是后续 —— 本机只能仿真口径。
+
+### 执行顺序
+
+1. Stage A × 2（两条并行，~5 分钟）
+2. Stage B × 2（w4a4 带 --reuse-trained-act-amax；w4 不带）
+3. 写 eval_w4a4.py → 四点评测 → 汇总表
+4. a4-v4 跑完后同样导出 + 纳入对比（第五点）
+
+### 结果（2026-07-02，统一 w4a4 仿真口径，eval-500 / 173 万 token）
+
+| 对比点 | PPL | vs teacher gap | 恢复率 |
+|---|---|---|---|
+| teacher（全精度上界） | 1.3240 | — | — |
+| PTQ-W₀（下界） | 1.4126 | 0.0886 | 0% |
+| **w4a4-QAD @400** | 1.3870 | 0.0630 | **28.9%** |
+| **w4-QAD @400 + A-PTQ** | 1.3862 | 0.0622 | **29.8%** |
+| w4-QAD @800 + A-PTQ（2× 训练量参考） | 1.3803 | 0.0563 | 36.5% |
+
+交叉验证：teacher/PTQ 点与训练中 veomni 路径的独立实现一致到第 4 位
+（1.3240/1.4126 vs 1.3241/1.4125）。两条 checkpoint 的 TRT-LLM 格式
+NVFP4 产物均已导出（`export/{w4a4-qad-400,w4-qad-400,w4-qad-800}/nvfp4_ckpt`）。
+
+**核心结论：激活量化不需要参与训练。** 同训练量（400 步）下，
+w4-QAD+激活PTQ（1.3862）与端到端 w4a4-QAD（1.3870）之差 0.0008，
+在 eval 噪声（±0.0014）以内 —— 统计上不可区分。与 a4 消融互相印证
+（纯激活侧训练不仅无增益还易恶化）：激活量化误差基本不是训练可补偿
+的成分，权重侧 QAD 才是恢复的全部来源。工程含义：训练管线可以只做
+w4（免校准阶段、免激活仿真开销、避开 a4 暴露的 lr 敏感性），激活量化
+交给部署时 PTQ；省出的算力投入更多训练步数收益更大（w4@800 → 36.5%）。
