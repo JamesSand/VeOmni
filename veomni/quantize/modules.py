@@ -119,8 +119,15 @@ class FakeQuantLinear(nn.Linear):
         Depends only on the weight, so it is computed on demand at logging
         steps instead of accumulating on the forward hot path (which would
         also double-count under gradient checkpointing recompute).
+
+        Outside forward, FSDP2 params are sharded DTensors — gather the full
+        tensor first (collective: every rank must call this in the same
+        order, which the trainer's iterate-all-layers loop guarantees).
         """
-        return nvfp4_weight_overflow_ratio(self.weight)
+        weight = self.weight
+        if isinstance(weight, torch.distributed.tensor.DTensor):
+            weight = weight.full_tensor()
+        return nvfp4_weight_overflow_ratio(weight)
 
     def extra_repr(self) -> str:
         return f"{super().extra_repr()}, weight_quant={self.weight_quant_enabled}, act_quant={self.act_quant_enabled}"
