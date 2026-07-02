@@ -60,6 +60,13 @@ veomni/
 │   │   └── npu/        HCCL pre-mul sum patch
 │   └── batch_invariant_ops/  Mode switch for deterministic ops
 ├── patchgen/           Auto-generate model patches from HuggingFace models
+├── quantize/           NVFP4 fake quantization for QAD training
+│   ├── fake_quant.py   NVFP4 quantize/dequantize math (E2M1 + two-level scale,
+│   │                   matches modelopt/TRT-LLM kernels; standalone, torch-only)
+│   ├── ste.py          Straight-through estimator w/ clamp masking (|x| > global_amax)
+│   ├── modules.py      FakeQuantLinear wrapper + wrap_linears_for_qad()
+│   ├── calibrate.py    Activation global-amax calibration (max collector + cross-rank MAX)
+│   └── config.py       QADQuantConfig (mode: w4/w4a4/a4, target_modules)
 ├── schedulers/         LR scheduler implementations (flow matching)
 ├── trainer/            Training loop implementations
 │   ├── base.py         BaseTrainer (ABC): the composable training skeleton
