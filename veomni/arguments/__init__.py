@@ -27,6 +27,7 @@ from .arguments_types import (
     OpsImplementationConfig,
     OptimizerConfig,
     ProfileConfig,
+    QADConfig,
     TrainingArguments,
     VeOmniArguments,
     WandbConfig,
