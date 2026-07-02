@@ -226,8 +226,13 @@ class _ChunkedLinearTopkDistill(torch.autograd.Function):
         dentropy_1d = dentropy.reshape(-1).float() if dentropy is not None else None
         ddistill_1d = ddistill.reshape(-1).float() if ddistill is not None else None
 
-        dhidden = torch.zeros_like(h_2d) if h_2d.requires_grad else None
-        dweight = torch.zeros_like(weight) if weight.requires_grad else None
+        # ctx.needs_input_grad is the engine's authoritative signal. The saved
+        # h_2d is a reshape made inside forward (grad mode off): whether it
+        # inherits requires_grad from the model's hidden states is not
+        # guaranteed — observed False for backbone activations, which silently
+        # returned dhidden=None and zeroed every gradient upstream of lm_head.
+        dhidden = torch.zeros_like(h_2d) if ctx.needs_input_grad[0] else None
+        dweight = torch.zeros_like(weight) if ctx.needs_input_grad[1] else None
 
         for chunk_start in range(0, T, ctx.chunk_size):
             chunk_end = min(chunk_start + ctx.chunk_size, T)

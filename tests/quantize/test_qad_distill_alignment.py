@@ -102,8 +102,11 @@ class TestIdenticalTeacherKLIsZero:
         hidden, lm_head, labels, ids, logps = _setup()
         hidden = hidden.clone().requires_grad_(True)
         lm_head = lm_head.clone().requires_grad_(True)
-        _, _, distill, _, _ = chunk_topk_distill_function(hidden, lm_head, labels, ids, logps, chunk_size=16)
-        distill.sum().backward()
-        assert hidden.grad is not None
-        assert lm_head.grad is not None
+        # Use the log_probs (CE) output for the gradient check: with an
+        # identical teacher the distill KL's gradient is legitimately ~0, so
+        # asserting on it cannot detect a broken dhidden path.
+        log_probs, _, distill, _, _ = chunk_topk_distill_function(hidden, lm_head, labels, ids, logps, chunk_size=16)
+        (-log_probs.sum() + 0.0 * distill.sum()).backward()
+        assert hidden.grad is not None and hidden.grad.float().norm().item() > 0
+        assert lm_head.grad is not None and lm_head.grad.float().norm().item() > 0
         assert ids.grad is None and logps.grad is None

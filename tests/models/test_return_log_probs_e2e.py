@@ -409,6 +409,17 @@ def test_return_log_probs_backward_flows_gradients(toy_path, family):
     assert torch.isfinite(lm_head_grad).all(), f"[{family}] lm_head.weight.grad has non-finite values"
     assert lm_head_grad.abs().max().item() > 0, f"[{family}] lm_head.weight.grad is all zero"
 
+    # Regression: gradients must also reach the BACKBONE, not just lm_head.
+    # The chunked kernels once gated dhidden on the saved reshape's
+    # requires_grad (unreliable inside Function.forward), silently returning
+    # dhidden=None — every parameter upstream of lm_head got zero/None grad
+    # while lm_head looked healthy, which this file's lm_head-only assertion
+    # missed.
+    backbone_grads = [(n, p.grad) for n, p in model.named_parameters() if p.grad is not None and "lm_head" not in n]
+    assert backbone_grads, f"[{family}] no backbone parameter received a gradient"
+    total = sum(g.float().norm().item() for _, g in backbone_grads)
+    assert total > 0, f"[{family}] backbone gradients are all zero — dhidden path broken"
+
     del model, out, log_probs, scalar
     _release()
 
