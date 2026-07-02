@@ -445,45 +445,37 @@ NVFP4 的格式参数（E2M1、block_size=16、block scale E4M3、global scale F
 
 ---
 
-## 10. 多机部署：k8s 开 2×8×H100 训练 pod
+## 10. 部署：单节点 8×H100 训练 + k8s 多 pod 并行消融
 
-训练基建在 `~/workspace/low-precision-project/k8s-from-h100-pod/`，已验证可用
-（context = `zhizhousha`，API 连通）。
+**一个 QAD 实验 = 一个 8×H100 节点，不需要多机。** 冒烟实测（Qwen3-8B，w4，
+seq 8192，teacher+student 双模型）：显存峰值 **26.7GB / 80GB**，余量巨大。
+算力上 QAD 每步 ≈ teacher 前向 + student 前向反向 ≈ 普通 SFT 的 ~1.3 倍，
+一个 epoch（~100 亿 token）8 卡约 2 天量级 —— 单节点完全可行。
 
-**机制：** 当前 dev pod（`zhizhousha-dev-8gpu-ssh`，即 §9 的 8×H100 机器）内置
-独立 `kubectl` + kubeconfig，直连 research-common H100 集群 API，在**其他节点**上
-调度新 pod —— 不是嵌套容器。
-
-**现成的训练 manifest：** `manifests/qad-train-2node.yaml` ——
-- 2 个 8×H100 pod，`podAntiAffinity` 强制分到不同节点 ⇒ 16×H100 双机；
-- IB RDMA（`rdma/infiniband: 1` + `IPC_LOCK` + hostIPC，实测 ~25.8GB/s/pair，
-  配套 `ib_allreduce_test.py` 可复验）；
-- **共享 home PVC（`home-zhizhousha`）**：VeOmni-qad worktree、venv、Qwen3-8B
-  模型、246GB 数据集在两个 pod 内路径与 dev pod 完全一致，零同步；
-- 镜像 `nvcr.io/nvidia/pytorch:25.11-py3`，`sleep infinity` 起容器、手动 exec 启动。
-
-**启动流程：**
+**默认路径：直接在当前 dev pod（`zhizhousha-dev-8gpu-ssh`）跑：**
 
 ```
-1. kubectl apply -f manifests/qad-train-2node.yaml，等两个 pod Ready
-2. kubectl get pods -o wide 拿 pod-0 IP 作为 rendezvous master
-3. 分别 exec 进两个 pod：
-   torchrun --nnodes=2 --node_rank={0,1} --master_addr=<pod0-IP> \
-     tasks/train_text_qad.py configs/text/qwen3_qad.yaml
-   （VeOmni 是 FSDP2，原生多机；NCCL 走 IB）
+torchrun --nproc_per_node=8 tasks/train_text_qad.py configs/text/qwen3_qad.yaml
 ```
 
-16 卡同时缓解 §9 问题 3 的 logits 显存压力（FSDP 分片更细），但分块 KL 仍要做。
+**k8s 多 pod 的正确用法：三个模式消融并行，一个 pod 一个实验。**
+基建在 `~/workspace/low-precision-project/k8s-from-h100-pod/`（dev pod 内置
+`kubectl` + kubeconfig 直连 research-common H100 集群 API，已验证连通）。
+共享 home PVC（`home-zhizhousha`）让每个新 pod 内的 worktree、venv、模型、
+数据集路径与 dev pod 完全一致，零同步。参照 `manifests/example-1gpu-pod.yaml`
+改成 8 GPU 单 pod manifest，开 2–3 个 pod 分别跑 `w4` / `w4a4` / `a4`
+（改 `--train.qad.mode` 和 `--train.checkpoint.output_dir` 即可），
+消融周转时间从串行 ~6 天缩到 ~2 天。
 
-**执行顺序：**
-
-1. 实现 §7 阶段 1–3（quantize 核心、QADConfig、TextQADTrainer + pretokenized
-   transform）；
-2. 先在**当前 dev pod** 单机 8 卡冒烟；
-3. 通过后 apply 2-node manifest 上 16 卡正式跑。
+（目录里的 `qad-train-2node.yaml` 双节点 manifest 是把单个实验拆到 16 卡的
+加速选项 —— 显存和正确性上都不需要，仅在赶单个实验的墙钟时间时才用。）
 
 **注意点：**
 
+- **triton cache 竞争（实测踩坑）**：共享文件系统 home（wekafs/PVC）上多 rank
+  并发编译同一 triton kernel 会在 `~/.triton/cache` 撞车（读到写了一半的
+  .cubin → FileNotFoundError，概率性）。`tasks/train_text_qad.py` 已按
+  LOCAL_RANK 设置本地盘 `TRITON_CACHE_DIR`；k8s 双 pod 共享 PVC 时同样必须。
 - NGC 容器已知坑（modelopt 被容器内置版本 shadow、triton 缺 ptxas/cuda.h ——
   之前在 Model-Optimizer 的 .venv 里修过）：进新 pod 后先确认共享 PVC 上的
   VeOmni .venv 与 25.11 镜像兼容，并跑一次 modelopt import 冒烟；
