@@ -12,6 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os as _os
+
+
+# Per-rank local Triton kernel cache under torchrun: on a shared-filesystem
+# HOME (wekafs/NFS PVC), ranks compiling the same kernel race on
+# ~/.triton/cache and fail probabilistically (FileNotFoundError on a .cubin
+# mid-write). Must run before .ops pulls triton in below; scoped to
+# distributed launches (LOCAL_RANK set) so plain library use is untouched.
+if "LOCAL_RANK" in _os.environ:
+    _os.environ.setdefault("TRITON_CACHE_DIR", f"/tmp/triton-cache-{_os.getuid()}-rank{_os.environ['LOCAL_RANK']}")
+
 from .ops import apply_ops_config, apply_ops_patch, format_kernel_functions
 from .utils.env import format_envs
 from .utils.logging import get_logger
