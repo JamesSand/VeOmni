@@ -10,6 +10,11 @@ data:
   eval_path: /home/zhizhousha/workspace/low-precision-project/model-and-data/datasets/qad-split-Qwen3-8B/eval
   data_type: pretokenized
   max_seq_len: 8192
+  # Token budget per epoch (dyn_bsz semantics): steps = train_size /
+  # (global_batch_size * max_seq_len). The default (1e7) silently caps a run
+  # at ~20 steps. 1e10 ~= one full pass over the 3M-sample split (~19k steps
+  # at gbs 64); override on the CLI for shorter runs.
+  train_size: 10000000000
   dyn_bsz_buffer_size: 200
 
 train:
